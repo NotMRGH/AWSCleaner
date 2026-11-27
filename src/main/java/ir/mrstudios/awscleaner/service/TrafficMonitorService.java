@@ -181,11 +181,11 @@ public final class TrafficMonitorService {
             Totals totals = metrics(region, instance, start, end);
             if (totals == null) {
                 missing++;
-                snapshots.putIfAbsent(instance.arn(), new Snapshot(null));
+                totals = snapshots.computeIfAbsent(instance.arn(), ignored -> new Snapshot(null)).totals();
             } else {
                 snapshots.put(instance.arn(), new Snapshot(totals));
-                known.add(totals);
             }
+            if (totals != null) known.add(totals);
         }
         int retired = 0;
         for (var snapshot : snapshots.entrySet()) {
@@ -285,7 +285,7 @@ public final class TrafficMonitorService {
     private void alert(YearMonth month, Instant end, List<Report> reports) throws IOException, InterruptedException {
         for (Report report : reports) {
             if (!month.equals(utcMonth(clock.instant()))) return;
-            if (report.percent() == null) continue;
+            if (!report.complete()) continue;
             var pool = state.pools().get(report.key());
             var crossed = config.warningPercentages().stream()
                     .filter(level -> report.totals().consumed() * 100 >= report.allowance() * level
@@ -397,27 +397,42 @@ public final class TrafficMonitorService {
     }
 
     private static String reportDetails(Report report, String region, NumberFormat number) {
-        String identity = """
+        var details = new StringBuilder("""
                 🌍 <b>Region</b> — %s
                 📦 <b>Bundle</b> — %s
                 🖥 <b>Active instances</b> — %s
-                """.formatted(escapeHtml(region), escapeHtml(report.plans()), number.format(report.active()));
-        Double percent = report.percent();
-        if (percent == null) return identity + "⚠️ Incomplete usage data";
-        String usage = """
-                ────────────────────
-                📊 <b>Total allowance</b> — %s
-                📥 <b>Inbound traffic</b> — %s
-                📤 <b>Outbound traffic</b> — %s
-                🔸 <b>Traffic used</b> — %s
-                🔹 <b>Traffic remaining</b> — %s
-
-                %s
-                📈 <b>Allowance used — %s%%</b>""".formatted(volume(number, report.allowance()),
-                volume(number, report.totals().incoming()), volume(number, report.totals().outgoing()),
-                volume(number, report.totals().consumed()), volume(number, report.remaining()),
-                usageProgress(percent), number.format(percent));
-        return identity + usage + (report.retired() == 0 ? "" : "\nTotals include the last readings from deleted instances.");
+                """.formatted(escapeHtml(region), escapeHtml(report.plans()), number.format(report.active())));
+        boolean complete = report.complete();
+        if (complete) {
+            details.append("────────────────────\n");
+        } else {
+            details.append("⚠️ Incomplete usage data\n");
+            if (report.missing() > 0) {
+                details.append("Instances with missing metrics — ").append(number.format(report.missing())).append('\n');
+            }
+        }
+        if (report.allowance() != null) {
+            details.append("📊 <b>Total allowance</b> — ").append(volume(number, report.allowance())).append('\n');
+        }
+        if (report.totals() != null) {
+            details.append("""
+                    📥 <b>Inbound traffic</b> — %s
+                    📤 <b>Outbound traffic</b> — %s
+                    🔸 <b>%s</b> — %s
+                    """.formatted(volume(number, report.totals().incoming()), volume(number, report.totals().outgoing()),
+                    complete ? "Traffic used" : "Recorded traffic", volume(number, report.totals().consumed())));
+        }
+        if (complete) {
+            details.append("🔹 <b>Traffic remaining</b> — ").append(volume(number, report.remaining())).append('\n');
+        }
+        Double percent = report.knownPercent();
+        if (percent != null) {
+            details.append('\n').append(usageProgress(percent)).append("\n📈 <b>")
+                    .append(complete ? "Allowance used" : "Recorded allowance used").append(" — ")
+                    .append(escapeHtml(percentNumber(number, percent))).append("%</b>\n");
+        }
+        if (complete && report.retired() > 0) details.append("Totals include the last readings from deleted instances.");
+        return details.toString().stripTrailing();
     }
 
     private static String escapeHtml(String value) {
@@ -433,7 +448,13 @@ public final class TrafficMonitorService {
     private static String volume(NumberFormat number, double bytes) {
         if (bytes >= TIB) return number.format(bytes / TIB) + " TiB";
         if (bytes >= GIB) return number.format(bytes / GIB) + " GiB";
-        return number.format(bytes / (1L << 20)) + " MiB";
+        if (bytes >= (1L << 20)) return number.format(bytes / (1L << 20)) + " MiB";
+        if (bytes >= (1L << 10)) return number.format(bytes / (1L << 10)) + " KiB";
+        return number.format(bytes) + " B";
+    }
+
+    private static String percentNumber(NumberFormat number, double percent) {
+        return percent > 0 && percent < 0.01 ? "<0.01" : number.format(percent);
     }
 
     private static NumberFormat trafficNumbers() {
@@ -443,17 +464,22 @@ public final class TrafficMonitorService {
     }
 
     private static void log(Report report) {
-        if (report.percent() == null) {
+        var number = trafficNumbers();
+        number.setGroupingUsed(false);
+        number.setMinimumFractionDigits(2);
+        Double percent = report.knownPercent();
+        String usedPercent = percent == null ? null : percentNumber(number, percent);
+        if (!report.complete()) {
             LOG.warn("Lightsail traffic estimate incomplete for {}: active={}, retired={}, missing={}, "
-                            + "allowanceBytes={}, knownTotals={}", report.key(), report.active(), report.retired(),
-                    report.missing(), report.allowance(), report.totals());
+                            + "allowanceBytes={}, knownTotals={}, knownConsumedBytes={}, knownUsedPercent={}",
+                    report.key(), report.active(), report.retired(), report.missing(), report.allowance(), report.totals(),
+                    report.totals() == null ? null : report.totals().consumed(), usedPercent);
             return;
         }
         LOG.info("Lightsail traffic estimate for {}: active={}, peak={}, retired={}, allowanceBytes={}, "
                         + "networkInBytes={}, networkOutBytes={}, consumedBytes={}, remainingBytes={}, usedPercent={}",
                 report.key(), report.active(), report.peak(), report.retired(), report.allowance(), report.totals().incoming(),
-                report.totals().outgoing(), report.totals().consumed(), report.remaining(),
-                String.format(Locale.ROOT, "%.2f", report.percent()));
+                report.totals().outgoing(), report.totals().consumed(), report.remaining(), usedPercent);
     }
 
     private void loadMonth(YearMonth month) throws IOException {
@@ -494,8 +520,12 @@ public final class TrafficMonitorService {
     private record Measurement(Pool pool, Report report) {}
     private record Report(String key, String region, String plans, int active, int peak, int retired, int missing,
                           Double allowance, Totals totals) {
-        Double percent() {
-            return allowance == null || missing != 0 || totals == null ? null : totals.consumed() / allowance * 100;
+        boolean complete() {
+            return allowance != null && missing == 0 && totals != null;
+        }
+
+        Double knownPercent() {
+            return allowance == null || totals == null ? null : totals.consumed() / allowance * 100;
         }
 
         double remaining() {
