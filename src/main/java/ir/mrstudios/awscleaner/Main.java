@@ -10,11 +10,14 @@ import ir.mrstudios.awscleaner.config.ConfigManager;
 import ir.mrstudios.awscleaner.network.HttpClientFactory;
 import ir.mrstudios.awscleaner.network.NetworkProbe;
 import ir.mrstudios.awscleaner.scheduler.HealthCheckScheduler;
+import ir.mrstudios.awscleaner.scheduler.TrafficMonitorScheduler;
 import ir.mrstudios.awscleaner.service.DnsSyncService;
 import ir.mrstudios.awscleaner.service.HealthCheckService;
 import ir.mrstudios.awscleaner.service.IpRotationService;
 import ir.mrstudios.awscleaner.service.RotationJournal;
+import ir.mrstudios.awscleaner.service.TrafficMonitorService;
 import ir.mrstudios.awscleaner.ssh.SshChecker;
+import ir.mrstudios.awscleaner.telegram.TelegramClient;
 import okhttp3.OkHttpClient;
 import org.slf4j.LoggerFactory;
 
@@ -22,6 +25,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 
 public final class Main {
     private Main() {}
@@ -69,16 +75,26 @@ public final class Main {
             System.out.println("Configuration already exists at " + source);
             return;
         }
-        AppConfig config = ConfigManager.load(source);
+        var trafficIssues = new ArrayList<String>();
+        AppConfig config = ConfigManager.load(source, trafficIssues::add);
         if (validateOnly) {
-            System.out.println("Configuration is valid.");
+            trafficIssues.forEach(System.err::println);
+            System.out.println(trafficIssues.isEmpty() ? "Configuration is valid." : "Core configuration is valid.");
             return;
         }
         configureLogging(config.logging());
         var log = LoggerFactory.getLogger(Main.class);
+        trafficIssues.forEach(issue -> log.warn("{}", issue));
         var clock = Clock.systemUTC();
         var endpoint = LightsailClient.endpoint(config.aws().region());
-        var awsHttp = HttpClientFactory.aws(config.aws(), endpoint.host());
+        var monitor = config.trafficMonitor();
+        var trafficRegions = new HashSet<>(monitor.regions());
+        if (monitor.enabled()) monitor.regions().forEach(region -> trafficRegions.add(TrafficMonitorService.catalogRegion(region)));
+        var proxyHosts = new HashSet<String>();
+        proxyHosts.add(endpoint.host());
+        if (monitor.enabled()) trafficRegions.forEach(region -> proxyHosts.add(LightsailClient.endpoint(region).host()));
+        if (monitor.telegram().enabled()) proxyHosts.add(TelegramClient.ENDPOINT.host());
+        var awsHttp = HttpClientFactory.aws(config.aws(), proxyHosts);
         var arvanHttp = HttpClientFactory.direct(config.arvan().timeoutSeconds());
         var probeHttp = HttpClientFactory.direct(config.networkCheck().timeoutSeconds());
         var aws = new LightsailClient(awsHttp, endpoint, config.aws(), clock);
@@ -91,9 +107,21 @@ public final class Main {
                 config.application().dryRun());
         var health = new HealthCheckService(aws, ssh, rotation, dns, journal, config.application().dryRun());
         var scheduler = new HealthCheckScheduler(config.application(), health);
+        var trafficClients = new HashMap<String, LightsailClient>();
+        if (monitor.enabled()) {
+            for (String region : trafficRegions) {
+                trafficClients.put(region, new LightsailClient(awsHttp, LightsailClient.endpoint(region), config.aws(), region, clock));
+            }
+        }
+        var telegram = monitor.telegram().enabled()
+                ? new TelegramClient(awsHttp, TelegramClient.ENDPOINT, monitor.telegram(), clock) : null;
+        var traffic = new TrafficMonitorScheduler(monitor,
+                new TrafficMonitorService(monitor, trafficClients, telegram, journal, clock));
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            traffic.stop();
             closeClients(awsHttp, arvanHttp, probeHttp);
             scheduler.close();
+            traffic.close();
             try {
                 journal.close();
             } catch (IOException e) {
@@ -104,6 +132,7 @@ public final class Main {
         log.info("AWSCleaner started for Lightsail instance {} in {} (dry run: {})", config.aws().instanceName(),
                 config.aws().region(), config.application().dryRun());
         scheduler.start();
+        traffic.start();
     }
 
     private static void configureLogging(AppConfig.Logging config) throws IOException {

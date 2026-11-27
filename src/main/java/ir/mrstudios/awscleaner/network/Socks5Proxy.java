@@ -14,26 +14,40 @@ import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 final class Socks5Proxy extends DirectSocketFactory {
     private final AppConfig.Proxy proxy;
-    private final String targetHost;
-    private final byte[] targetBytes;
+    private final Map<String, InetAddress> destinations;
     private final int timeoutMillis;
 
-    Socks5Proxy(AppConfig.Proxy proxy, String targetHost, int timeoutSeconds) {
+    Socks5Proxy(AppConfig.Proxy proxy, Set<String> hosts, int timeoutSeconds) {
         this.proxy = proxy;
-        this.targetHost = targetHost;
-        this.targetBytes = targetHost.getBytes(StandardCharsets.US_ASCII);
         this.timeoutMillis = Math.toIntExact(TimeUnit.SECONDS.toMillis(timeoutSeconds));
+        var addresses = new HashMap<String, InetAddress>();
+        int index = 0;
+        for (String host : hosts) {
+            // Distinct synthetic addresses prevent HTTP/2 connection coalescing between SOCKS destinations.
+            byte[] address = {0x20, 1, 0x0d, (byte) 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            java.nio.ByteBuffer.wrap(address).putInt(12, ++index);
+            try {
+                addresses.put(host, InetAddress.getByAddress(host, address));
+            } catch (UnknownHostException e) {
+                throw new IllegalStateException("Invalid synthetic SOCKS address");
+            }
+        }
+        this.destinations = Map.copyOf(addresses);
     }
 
     Dns remoteDns() {
         return host -> {
-            if (!targetHost.equals(host)) throw new UnknownHostException("Unexpected SOCKS5 destination");
-            return List.of(InetAddress.getByAddress(host, new byte[]{(byte) 192, 0, 2, 1}));
+            InetAddress address = destinations.get(host);
+            if (address == null) throw new UnknownHostException("Unexpected SOCKS5 destination");
+            return List.of(address);
         };
     }
 
@@ -42,7 +56,7 @@ final class Socks5Proxy extends DirectSocketFactory {
         return new Socket(Proxy.NO_PROXY) {
             @Override
             public void connect(SocketAddress endpoint, int timeout) throws IOException {
-                if (!(endpoint instanceof InetSocketAddress target) || !targetHost.equals(target.getHostString())) {
+                if (!(endpoint instanceof InetSocketAddress target) || !destinations.containsKey(target.getHostString())) {
                     throw new IOException("Unexpected SOCKS5 destination");
                 }
                 int budget = timeout == 0 ? timeoutMillis : Math.min(timeout, timeoutMillis);
@@ -50,7 +64,7 @@ final class Socks5Proxy extends DirectSocketFactory {
                 int originalTimeout = getSoTimeout();
                 try {
                     super.connect(new InetSocketAddress(proxy.host(), proxy.port()), remaining(deadline));
-                    negotiate(this, target.getPort(), deadline);
+                    negotiate(this, target.getHostString(), target.getPort(), deadline);
                     setSoTimeout(originalTimeout);
                 } catch (IOException e) {
                     close();
@@ -60,7 +74,7 @@ final class Socks5Proxy extends DirectSocketFactory {
         };
     }
 
-    private void negotiate(Socket socket, int port, long deadline) throws IOException {
+    private void negotiate(Socket socket, String host, int port, long deadline) throws IOException {
         var in = new DataInputStream(socket.getInputStream());
         var out = new DataOutputStream(socket.getOutputStream());
         int method = proxy.username().isEmpty() ? 0 : 2;
@@ -82,6 +96,7 @@ final class Socks5Proxy extends DirectSocketFactory {
                 throw new IOException("SOCKS5 authentication failed");
             }
         }
+        byte[] targetBytes = host.getBytes(StandardCharsets.US_ASCII);
         out.write(new byte[]{5, 1, 0, 3, (byte) targetBytes.length});
         out.write(targetBytes);
         out.writeShort(port);
