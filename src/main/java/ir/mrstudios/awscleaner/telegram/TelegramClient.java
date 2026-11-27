@@ -33,6 +33,14 @@ public final class TelegramClient {
     }
 
     public boolean send(String message) throws IOException, InterruptedException {
+        return send(message, null);
+    }
+
+    public boolean sendHtml(String message) throws IOException, InterruptedException {
+        return send(message, "HTML");
+    }
+
+    private boolean send(String message, String parseMode) throws IOException, InterruptedException {
         if (clock.instant().isBefore(resumeAt)) return false;
         if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
         if (lastRequest != 0) {
@@ -42,6 +50,7 @@ public final class TelegramClient {
         var payload = new JsonObject();
         payload.addProperty("chat_id", chatId);
         payload.addProperty("text", message);
+        if (parseMode != null) payload.addProperty("parse_mode", parseMode);
         var request = new Request.Builder().url(sendMessage).post(HttpJson.body(
                 payload.toString().getBytes(StandardCharsets.UTF_8), "application/json; charset=utf-8", true)).build();
         lastRequest = System.nanoTime();
@@ -53,7 +62,6 @@ public final class TelegramClient {
             retryAfter = response.header("Retry-After");
             status = response.code();
         } catch (IOException e) {
-            // OkHttp exceptions can include the request URL, which contains the bot token.
             throw new IOException("Telegram sendMessage failed (" + e.getClass().getSimpleName() + ")");
         }
         if (status == 429) {

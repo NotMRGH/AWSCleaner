@@ -46,6 +46,7 @@ public final class TrafficMonitorService {
     private static final double GIB = 1L << 30;
     private static final double TIB = 1L << 40;
     private static final int CRITICAL_ICON_PERCENTAGE = 90;
+    private static final int STARTUP_DETAILS_LIMIT = 3800;
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss 'UTC'", Locale.ROOT)
             .withZone(ZoneOffset.UTC);
     private final AppConfig.TrafficMonitor config;
@@ -294,7 +295,7 @@ public final class TrafficMonitorService {
             String regionName = regionName(report.region());
             if (!month.equals(utcMonth(clock.instant()))) return;
             try {
-                if (!telegram.send(message(report, regionName, highest, end))) {
+                if (!telegram.sendHtml(message(report, regionName, highest, end))) {
                     LOG.info("Lightsail traffic alerts deferred by Telegram rate limit");
                     return;
                 }
@@ -315,7 +316,7 @@ public final class TrafficMonitorService {
         if (telegram == null) return;
         String message = startupMessage(time, result);
         try {
-            if (telegram.send(message)) {
+            if (telegram.sendHtml(message)) {
                 LOG.info("Sent Lightsail traffic startup status");
             } else {
                 LOG.warn("Lightsail traffic startup status skipped during Telegram rate limit");
@@ -326,47 +327,43 @@ public final class TrafficMonitorService {
     }
 
     private String startupMessage(Instant time, CycleResult result) {
-        var number = persianNumbers();
-        var lines = new ArrayList<String>();
+        var number = trafficNumbers();
+        var sections = new ArrayList<String>();
         if (result == null) {
             if (config.checkOnStartup()) {
-                lines.add("دادهٔ مصرف در شروع در دسترس نیست.");
+                sections.add("Traffic data is unavailable at startup.");
             } else {
-                lines.add("اولین بررسی ترافیک پس از " + number.format(config.checkIntervalMinutes()) + " دقیقه انجام می‌شود.");
+                int minutes = config.checkIntervalMinutes();
+                sections.add("First traffic check in " + number.format(minutes) + (minutes == 1 ? " minute." : " minutes."));
             }
-            config.regions().forEach(lines::add);
+            sections.add("🌍 <b>Monitored regions</b> — " + escapeHtml(String.join(", ", config.regions())));
         } else {
             for (String region : config.regions()) {
                 if (!result.checkedRegions().contains(region)) {
-                    lines.add("• " + region + " — اطلاعات در دسترس نیست");
+                    sections.add("🌍 <b>" + escapeHtml(region) + "</b> — Traffic data unavailable");
                     continue;
                 }
                 var groups = result.reports().stream().filter(report -> region.equals(report.region())).toList();
                 if (groups.isEmpty()) {
-                    lines.add("• " + region + " — بدون سرور");
+                    sections.add("🌍 <b>" + escapeHtml(region) + "</b> — No instances");
                     continue;
                 }
                 for (Report report : groups) {
-                    String usage = report.percent() == null ? "دادهٔ مصرف ناقص است"
-                            : "%s٪ مصرف — %s از %s".formatted(number.format(report.percent()),
-                                    volume(number, report.totals().consumed()), volume(number, report.allowance()));
-                    lines.add("• %s / %s — %s سرور — %s".formatted(
-                            region, report.plans(), number.format(report.active()), usage));
+                    sections.add(reportDetails(report, region, number));
                 }
             }
         }
-        var status = new StringBuilder("🟢 AWSCleaner اجرا شد\nوضعیت مانیتور ترافیک Lightsail\n")
-                .append(TIMESTAMP.format(time)).append('\n');
-        if (result != null) status.append("ارقام مصرف و سهمیه تخمینی‌اند.\n");
-        for (String line : lines) {
-            // Leave room for the footer within Telegram's 4096-character sendMessage limit.
-            if (status.length() + line.length() > 3800) {
-                status.append("… جزئیات ریجن‌ها و پلن‌های دیگر در لاگ برنامه ثبت می‌شود.\n");
+        var status = new StringBuilder("🟢 <b>AWSCleaner started</b>\nLightsail traffic status\n⏰ ")
+                .append(TIMESTAMP.format(time));
+        for (String section : sections) {
+            if (status.length() + section.length() + 2 > STARTUP_DETAILS_LIMIT) {
+                status.append("\n\n… See the application log for the remaining regions and bundles.");
                 break;
             }
-            status.append(line).append('\n');
+            status.append("\n\n").append(section);
         }
-        return status.toString().stripTrailing();
+        if (result != null) status.append("\n\nℹ️ Usage and allowances are estimates.");
+        return status.toString();
     }
 
     private String regionName(String region) throws InterruptedException {
@@ -388,38 +385,59 @@ public final class TrafficMonitorService {
     }
 
     private static String message(Report report, String regionName, int level, Instant end) {
-        var number = persianNumbers();
+        String icon = level >= CRITICAL_ICON_PERCENTAGE ? "🔴" : "⚠️";
         return """
-                %s هشدار مصرف ترافیک آمازون
+                %s <b>Amazon Lightsail Traffic Warning</b>
 
-                🌍 ریجن: %s
-                📦 پلن: %s
-                🖥 تعداد سرورها: %s
+                %s
 
-                📊 ترافیک کل: %s
-                📥 ترافیک ورودی: %s
-                📤 ترافیک خروجی: %s
-                🔸 ترافیک مصرف‌شده: %s
-                🔹 ترافیک باقی‌مانده: %s
+                ⏰ Checked at %s
+                ℹ️ Usage and allowances are estimates.
+                """.formatted(icon, reportDetails(report, regionName, trafficNumbers()), TIMESTAMP.format(end)).stripTrailing();
+    }
 
-                📈 درصد مصرف: %s٪
-                ⏰ زمان بررسی: %s
-                ℹ️ مصرف و سهمیه تخمینی‌اند.
-                """.formatted(level >= CRITICAL_ICON_PERCENTAGE ? "🔴" : "⚠️", regionName, report.plans(),
-                number.format(report.active()), volume(number, report.allowance()), volume(number, report.totals().incoming()),
-                volume(number, report.totals().outgoing()), volume(number, report.totals().consumed()),
-                volume(number, report.remaining()), number.format(report.percent()), TIMESTAMP.format(end))
-                + (report.retired() == 0 ? "" : "مصرف نمونه‌های حذف‌شده تا آخرین اندازه‌گیری در جمع لحاظ شده است.");
+    private static String reportDetails(Report report, String region, NumberFormat number) {
+        String identity = """
+                🌍 <b>Region</b> — %s
+                📦 <b>Bundle</b> — %s
+                🖥 <b>Active instances</b> — %s
+                """.formatted(escapeHtml(region), escapeHtml(report.plans()), number.format(report.active()));
+        Double percent = report.percent();
+        if (percent == null) return identity + "⚠️ Incomplete usage data";
+        String usage = """
+                ────────────────────
+                📊 <b>Total allowance</b> — %s
+                📥 <b>Inbound traffic</b> — %s
+                📤 <b>Outbound traffic</b> — %s
+                🔸 <b>Traffic used</b> — %s
+                🔹 <b>Traffic remaining</b> — %s
+
+                %s
+                📈 <b>Allowance used — %s%%</b>""".formatted(volume(number, report.allowance()),
+                volume(number, report.totals().incoming()), volume(number, report.totals().outgoing()),
+                volume(number, report.totals().consumed()), volume(number, report.remaining()),
+                usageProgress(percent), number.format(percent));
+        return identity + usage + (report.retired() == 0 ? "" : "\nTotals include the last readings from deleted instances.");
+    }
+
+    private static String escapeHtml(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    private static String usageProgress(double percent) {
+        int segments = 10;
+        int filled = (int) (Math.min(percent, 100) * segments / 100);
+        return "🟨".repeat(filled) + "⬛".repeat(segments - filled);
     }
 
     private static String volume(NumberFormat number, double bytes) {
-        if (bytes >= TIB) return number.format(bytes / TIB) + " ترابایت";
-        if (bytes >= GIB) return number.format(bytes / GIB) + " گیگابایت";
-        return number.format(bytes / (1L << 20)) + " مگابایت";
+        if (bytes >= TIB) return number.format(bytes / TIB) + " TiB";
+        if (bytes >= GIB) return number.format(bytes / GIB) + " GiB";
+        return number.format(bytes / (1L << 20)) + " MiB";
     }
 
-    private static NumberFormat persianNumbers() {
-        var number = NumberFormat.getNumberInstance(Locale.forLanguageTag("fa-IR"));
+    private static NumberFormat trafficNumbers() {
+        var number = NumberFormat.getNumberInstance(Locale.US);
         number.setMaximumFractionDigits(2);
         return number;
     }

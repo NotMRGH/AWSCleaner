@@ -1,6 +1,6 @@
 # AWSCleaner
 
-AWSCleaner monitors an Amazon Lightsail instance over SSH, rotates its public IPv4 address when reachability checks fail, and synchronizes selected ArvanCloud DNS A records. An independent traffic monitor tracks monthly Lightsail transfer and sends Persian Telegram alerts. The application runs on a Linux host with Java 17 and includes a Bash menu.
+AWSCleaner monitors an Amazon Lightsail instance over SSH, rotates its public IPv4 address when reachability checks fail, and synchronizes selected ArvanCloud DNS A records. An independent traffic monitor tracks monthly Lightsail transfer and sends English Telegram alerts. The application runs on a Linux host with Java 17 and includes a Bash menu.
 
 AWS requests use SigV4. AWS and Telegram share a SOCKS5 client. SSH, ArvanCloud API requests, and the HTTPS connectivity probes go directly from the host running AWSCleaner. Each scheduler waits until its own check finishes before starting the configured delay.
 
@@ -120,7 +120,7 @@ Add the following read permissions as a separate statement in the Lightsail poli
 
 Create a bot with BotFather and supply its token as `TELEGRAM_BOT_TOKEN` in your environment or `awscleaner.env`. Replace the sample `chat-id` with the destination's signed numeric ID. Start the bot from a private chat, add it to the receiving group, or give it posting access in the receiving channel. The monitor calls `sendMessage` through the AWS SOCKS5 client and respects Telegram's flood-control delay. [Bot setup](https://core.telegram.org/bots/features#botfather) · [sendMessage](https://core.telegram.org/bots/api#sendmessage) · [Bot rate limits](https://core.telegram.org/bots/faq#my-bot-is-hitting-limits-how-do-i-avoid-this)
 
-With Telegram enabled, each application launch sends one Persian startup status message independently of the warning thresholds. It includes the first traffic estimates when `check-on-startup` is enabled. When the first check is scheduled for later, the startup message lists the monitored Regions and the wait until that check.
+With Telegram enabled, each application launch sends one English startup status message independently of the warning thresholds. It includes the first traffic estimates when `check-on-startup` is enabled. When the first check is scheduled for later, the startup message lists the monitored Regions and the wait until that check. Telegram status messages and alerts show a progress bar alongside each available usage percentage.
 
 ### How the estimate works
 

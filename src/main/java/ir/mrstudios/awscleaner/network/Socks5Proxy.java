@@ -31,7 +31,6 @@ final class Socks5Proxy extends DirectSocketFactory {
         var addresses = new HashMap<String, InetAddress>();
         int index = 0;
         for (String host : hosts) {
-            // Distinct synthetic addresses prevent HTTP/2 connection coalescing between SOCKS destinations.
             byte[] address = {0x20, 1, 0x0d, (byte) 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
             java.nio.ByteBuffer.wrap(address).putInt(12, ++index);
             try {
