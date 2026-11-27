@@ -5,17 +5,12 @@ import okhttp3.OkHttpClient;
 
 import java.net.Proxy;
 import java.time.Duration;
-import java.util.Set;
 
 public final class HttpClientFactory {
     private HttpClientFactory() {}
 
     public static OkHttpClient aws(AppConfig.Aws config, String host) {
-        return aws(config, Set.of(host));
-    }
-
-    public static OkHttpClient aws(AppConfig.Aws config, Set<String> hosts) {
-        var socks = new Socks5Proxy(config.proxy(), hosts, config.timeoutSeconds());
+        var socks = new Socks5Proxy(config.proxy(), host, config.timeoutSeconds());
         return builder(config.timeoutSeconds()).socketFactory(socks).dns(socks.remoteDns()).build();
     }
 

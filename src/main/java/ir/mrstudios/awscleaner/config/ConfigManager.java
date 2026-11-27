@@ -9,7 +9,6 @@ import org.yaml.snakeyaml.error.YAMLException;
 
 import java.io.IOException;
 import java.io.Reader;
-import java.math.BigInteger;
 import java.net.IDN;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
@@ -23,13 +22,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
-import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 public final class ConfigManager {
     private static final Pattern ENV = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)}");
-    private static final String REGION = "[a-z]{2}(?:-[a-z0-9]+)+-\\d+";
     private static final List<String> PROBES = List.of(
             "https://www.gstatic.com/generate_204", "https://www.cloudflare.com/cdn-cgi/trace");
 
@@ -56,27 +52,19 @@ public final class ConfigManager {
     }
 
     public static AppConfig load(Path path) throws IOException {
-        return load(path, null);
-    }
-
-    public static AppConfig load(Path path, Consumer<String> trafficIssue) throws IOException {
         try (Reader input = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-            return load(input, System.getenv(), trafficIssue);
+            return load(input, System.getenv());
         }
     }
 
     static AppConfig load(Reader input, Map<String, String> env) {
-        return load(input, env, null);
-    }
-
-    static AppConfig load(Reader input, Map<String, String> env, Consumer<String> trafficIssue) {
         LoaderOptions options = new LoaderOptions();
         options.setAllowDuplicateKeys(false);
         options.setMaxAliasesForCollections(10);
         options.setNestingDepthLimit(15);
         options.setCodePointLimit(256_000);
         try {
-            return parse(new Node(new Yaml(new SafeConstructor(options)).load(input), "", env), trafficIssue);
+            return parse(new Node(new Yaml(new SafeConstructor(options)).load(input), "", env));
         } catch (MarkedYAMLException e) {
             String line = e.getProblemMark() == null ? "" : " at line " + (e.getProblemMark().getLine() + 1);
             throw new IllegalArgumentException("Invalid YAML" + line);
@@ -85,8 +73,8 @@ public final class ConfigManager {
         }
     }
 
-    private static AppConfig parse(Node root, Consumer<String> trafficIssue) {
-        root.only("application", "aws", "ssh", "ip-rotation", "arvan", "logging", "network-check", "traffic-monitor");
+    private static AppConfig parse(Node root) {
+        root.only("application", "aws", "ssh", "ip-rotation", "arvan", "logging", "network-check");
         Node app = root.child("application");
         app.only("check-interval-minutes", "check-on-startup", "dry-run", "state-file");
         var application = new AppConfig.Application(app.number("check-interval-minutes", 5, 1, 1440),
@@ -113,7 +101,7 @@ public final class ConfigManager {
         }
         var awsConfig = new AppConfig.Aws(aws.match("access-key-id", "[A-Za-z0-9]+"),
                 aws.match("secret-access-key", "[!-~]+"), aws.header("session-token", ""),
-                aws.match("region", REGION),
+                aws.match("region", "[a-z]{2}(?:-[a-z0-9]+)+-\\d+"),
                 aws.match("instance-name", "[A-Za-z0-9_][A-Za-z0-9_-]*[A-Za-z0-9_]"),
                 awsTimeout, operationTimeout, proxyConfig);
 
@@ -174,52 +162,7 @@ public final class ConfigManager {
             throw network.invalid("urls", "at least one direct network probe is required");
         }
         return new AppConfig(application, awsConfig, sshConfig, rotationConfig, arvanConfig, loggingConfig,
-                new AppConfig.NetworkCheck(network.number("timeout-seconds", 5, 1, 60), List.copyOf(urls)),
-                trafficMonitor(root, awsConfig.region(), trafficIssue));
-    }
-
-    private static AppConfig.TrafficMonitor trafficMonitor(Node root, String defaultRegion, Consumer<String> issue) {
-        var disabled = AppConfig.Telegram.disabled();
-        try {
-            var node = root.optionalChild("traffic-monitor");
-            node.only("enabled", "check-on-startup", "check-interval-minutes", "regions", "warning-percentages", "telegram");
-            boolean enabled = node.flag("enabled", false);
-            var regions = new LinkedHashSet<>(node.strings("regions", List.of(defaultRegion)));
-            if (regions.isEmpty() || regions.stream().anyMatch(region -> region.length() > 63 || !region.matches(REGION))) {
-                throw node.invalid("regions", "requires at least one AWS Region code");
-            }
-            var percentages = new TreeSet<Integer>();
-            String field = "warning-percentages";
-            for (Object value : node.list(field, List.of())) {
-                long percent = node.integer(field, value);
-                if (percent < 1 || percent > 100) throw node.invalid(field, "requires percentages between 1 and 100");
-                percentages.add((int) percent);
-            }
-            AppConfig.Telegram telegram = disabled;
-            if (enabled) {
-                try {
-                    var target = node.optionalChild("telegram");
-                    target.only("enabled", "bot-token", "chat-id");
-                    if (target.flag("enabled", false)) {
-                        if (percentages.isEmpty()) throw node.invalid(field, "requires at least one alert threshold");
-                        String token = target.match("bot-token", "[0-9]+:[A-Za-z0-9_-]+");
-                        long chatId = target.integer("chat-id", target.values.get("chat-id"));
-                        if (chatId == 0) throw target.invalid("chat-id", "must be nonzero");
-                        telegram = new AppConfig.Telegram(true, token, chatId);
-                    }
-                } catch (IllegalArgumentException e) {
-                    if (issue == null) throw e;
-                    issue.accept(e.getMessage() + " (Telegram alerts disabled)");
-                }
-            }
-            return new AppConfig.TrafficMonitor(enabled, node.flag("check-on-startup", true),
-                    node.number("check-interval-minutes", 10, 1, 1440),
-                    List.copyOf(regions), List.copyOf(percentages), telegram);
-        } catch (IllegalArgumentException e) {
-            if (issue == null) throw e;
-            issue.accept(e.getMessage() + " (traffic monitor disabled)");
-            return AppConfig.TrafficMonitor.disabled();
-        }
+                new AppConfig.NetworkCheck(network.number("timeout-seconds", 5, 1, 60), List.copyOf(urls)));
     }
 
     private static List<AppConfig.DnsTarget> targets(Node arvan) {
@@ -358,17 +301,6 @@ public final class ConfigManager {
             } catch (NumberFormatException ignored) {
             }
             throw invalid(field, "must be an integer between " + min + " and " + max);
-        }
-
-        long integer(String field, Object value) {
-            try {
-                if (value instanceof Integer n) return n.longValue();
-                if (value instanceof Long n) return n;
-                if (value instanceof BigInteger n) return n.longValueExact();
-                if (value instanceof String text) return Long.parseLong(substitute(field, text));
-            } catch (NumberFormatException | ArithmeticException ignored) {
-            }
-            throw invalid(field, "requires a signed 64-bit integer");
         }
 
         boolean flag(String field, boolean fallback) {

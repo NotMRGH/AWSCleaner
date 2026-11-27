@@ -5,14 +5,9 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import ir.mrstudios.awscleaner.config.AppConfig;
 import ir.mrstudios.awscleaner.model.Lightsail.Action;
-import ir.mrstudios.awscleaner.model.Lightsail.Bundle;
 import ir.mrstudios.awscleaner.model.Lightsail.Instance;
-import ir.mrstudios.awscleaner.model.Lightsail.MetricPoint;
-import ir.mrstudios.awscleaner.model.Lightsail.NetworkMetric;
 import ir.mrstudios.awscleaner.model.Lightsail.Operation;
-import ir.mrstudios.awscleaner.model.Lightsail.Region;
 import ir.mrstudios.awscleaner.model.Lightsail.StaticIp;
-import ir.mrstudios.awscleaner.model.Lightsail.TrafficInstance;
 import ir.mrstudios.awscleaner.util.ApiException;
 import ir.mrstudios.awscleaner.util.HttpJson;
 import ir.mrstudios.awscleaner.util.Ipv4;
@@ -26,12 +21,10 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 public final class LightsailClient {
     private static final Logger LOG = LoggerFactory.getLogger(LightsailClient.class);
@@ -39,15 +32,9 @@ public final class LightsailClient {
     private final OkHttpClient http;
     private final HttpUrl endpoint;
     private final AppConfig.Aws config;
-    private final String region;
     private final Clock clock;
-    private long lastTrafficRequest;
 
     public LightsailClient(OkHttpClient http, HttpUrl endpoint, AppConfig.Aws config, Clock clock) {
-        this(http, endpoint, config, config.region(), clock);
-    }
-
-    public LightsailClient(OkHttpClient http, HttpUrl endpoint, AppConfig.Aws config, String region, Clock clock) {
         this.http = http.newBuilder().addNetworkInterceptor(chain -> {
             var transmission = chain.request().tag(Transmission.class);
             if (transmission != null) transmission.started = true;
@@ -55,7 +42,6 @@ public final class LightsailClient {
         }).build();
         this.endpoint = endpoint;
         this.config = config;
-        this.region = region;
         this.clock = clock;
     }
 
@@ -81,36 +67,6 @@ public final class LightsailClient {
         String state = HttpJson.string(result.getAsJsonObject("state"), "name");
         if (state.isEmpty()) throw invalid("GetInstanceState");
         return state;
-    }
-
-    public List<TrafficInstance> getInstances() throws IOException, InterruptedException {
-        return paginated("GetInstances", new JsonObject(), "instances", TrafficInstance.class, 0, true);
-    }
-
-    public List<Bundle> getBundles() throws IOException, InterruptedException {
-        var params = new JsonObject();
-        params.addProperty("includeInactive", true);
-        return paginated("GetBundles", params, "bundles", Bundle.class, 0, true);
-    }
-
-    public List<Region> getRegions() throws IOException, InterruptedException {
-        return list(read("GetRegions", new JsonObject(), 0, true), "regions", Region.class);
-    }
-
-    public List<MetricPoint> getNetworkMetric(String name, NetworkMetric metric, Instant start, Instant end)
-            throws IOException, InterruptedException {
-        var params = input("instanceName", name);
-        params.addProperty("metricName", metric.name());
-        params.addProperty("startTime", start.getEpochSecond());
-        params.addProperty("endTime", end.getEpochSecond());
-        params.addProperty("period", 3600);
-        params.addProperty("unit", "Bytes");
-        var statistics = new JsonArray();
-        statistics.add("Sum");
-        params.add("statistics", statistics);
-        var response = read("GetInstanceMetricData", params, 0, true);
-        if (!metric.name().equals(HttpJson.string(response, "metricName"))) throw invalid("GetInstanceMetricData");
-        return list(response, "metricData", MetricPoint.class);
     }
 
     public List<StaticIp> getStaticIps() throws IOException, InterruptedException {
@@ -163,23 +119,13 @@ public final class LightsailClient {
 
     private <T> List<T> paginated(String action, JsonObject params, String key, Class<T> type, long deadline)
             throws IOException, InterruptedException {
-        return paginated(action, params, key, type, deadline, false);
-    }
-
-    private <T> List<T> paginated(String action, JsonObject params, String key, Class<T> type, long deadline,
-                                 boolean traffic) throws IOException, InterruptedException {
         List<T> result = new ArrayList<>();
         var seen = new HashSet<String>();
         String token;
         do {
-            var page = read(action, params, deadline, traffic);
-            if (traffic || (page.has(key) && !page.get(key).isJsonNull())) result.addAll(list(page, key, type));
+            var page = read(action, params, deadline);
+            if (page.has(key) && !page.get(key).isJsonNull()) result.addAll(list(page, key, type));
             token = HttpJson.string(page, "nextPageToken");
-            if (traffic && page.has("nextPageToken") && !page.get("nextPageToken").isJsonNull()
-                    && (!page.get("nextPageToken").isJsonPrimitive()
-                    || !page.getAsJsonPrimitive("nextPageToken").isString())) {
-                throw invalid(action + " pagination");
-            }
             if (!token.isEmpty() && (!seen.add(token) || seen.size() > 1000)) throw invalid(action + " pagination");
             params.addProperty("pageToken", token);
         } while (!token.isEmpty());
@@ -191,20 +137,8 @@ public final class LightsailClient {
     }
 
     private JsonObject read(String action, JsonObject params, long deadline) throws IOException, InterruptedException {
-        return read(action, params, deadline, false);
-    }
-
-    private JsonObject read(String action, JsonObject params, long deadline, boolean traffic)
-            throws IOException, InterruptedException {
         for (int retry = 0; ; retry++) {
             try {
-                if (traffic) {
-                    if (lastTrafficRequest != 0) {
-                        long remaining = TimeUnit.MILLISECONDS.toNanos(250) - (System.nanoTime() - lastTrafficRequest);
-                        if (remaining > 0) TimeUnit.NANOSECONDS.sleep(remaining);
-                    }
-                    lastTrafficRequest = System.nanoTime();
-                }
                 return call(action, params, false, deadline);
             } catch (IOException e) {
                 if (deadline != 0 || retry == 2 || (e instanceof ApiException api && !api.retryable())) throw e;
@@ -222,7 +156,7 @@ public final class LightsailClient {
         Transmission transmission = new Transmission();
         var request = new Request.Builder().url(endpoint).tag(Transmission.class, transmission)
                 .post(HttpJson.body(bytes, AwsSignatureV4.CONTENT_TYPE, mutation));
-        AwsSignatureV4.lightsail(config, region, host, action, bytes, clock.instant()).forEach(request::header);
+        AwsSignatureV4.lightsail(config, host, action, bytes, clock.instant()).forEach(request::header);
         var call = http.newCall(request.build());
         if (deadline != 0) {
             long remaining = deadline - System.nanoTime();

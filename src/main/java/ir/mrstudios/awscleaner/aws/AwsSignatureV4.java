@@ -24,15 +24,14 @@ public final class AwsSignatureV4 {
 
     private AwsSignatureV4() {}
 
-    static Map<String, String> lightsail(AppConfig.Aws config, String region, String host, String action,
-                                       byte[] payload, Instant now) {
+    static Map<String, String> lightsail(AppConfig.Aws config, String host, String action, byte[] payload, Instant now) {
         var headers = new LinkedHashMap<String, String>();
         headers.put("host", host);
         headers.put("content-type", CONTENT_TYPE);
         headers.put("x-amz-target", "Lightsail_20161128." + action);
         headers.put("x-amz-date", TIMESTAMP.format(now));
         if (!config.sessionToken().isEmpty()) headers.put("x-amz-security-token", config.sessionToken());
-        headers.put("Authorization", authorization(config.accessKeyId(), config.secretAccessKey(), region,
+        headers.put("Authorization", authorization(config.accessKeyId(), config.secretAccessKey(), config.region(),
                 "lightsail", "POST", "/", "", headers, payload));
         return headers;
     }

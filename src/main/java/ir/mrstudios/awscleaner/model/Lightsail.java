@@ -4,18 +4,6 @@ public final class Lightsail {
     private Lightsail() {}
 
     public record Instance(String arn, String publicIpAddress, boolean isStaticIp) {}
-    public record TrafficInstance(String arn, String name, String bundleId, Double createdAt, Networking networking) {
-        public Integer allocatedTransfer() {
-            return networking == null || networking.monthlyTransfer() == null
-                    ? null : networking.monthlyTransfer().gbPerMonthAllocated();
-        }
-    }
-    public record Networking(MonthlyTransfer monthlyTransfer) {}
-    public record MonthlyTransfer(Integer gbPerMonthAllocated) {}
-    public record Bundle(String bundleId, Integer transferPerMonthInGb) {}
-    public record Region(String name, String displayName) {}
-    public record MetricPoint(Double timestamp, Double sum, String unit) {}
-    public enum NetworkMetric { NetworkIn, NetworkOut }
     public record StaticIp(String name, String arn, String ipAddress, boolean isAttached, String attachedTo) {
         public boolean attachedTo(String instanceName) {
             return isAttached && instanceName.equals(attachedTo);

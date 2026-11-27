@@ -2,15 +2,12 @@ package ir.mrstudios.awscleaner.service;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
 import ir.mrstudios.awscleaner.model.Lightsail.Action;
 import ir.mrstudios.awscleaner.model.Lightsail.StaticIp;
 import ir.mrstudios.awscleaner.model.RotationState;
 import ir.mrstudios.awscleaner.model.RotationState.Pending;
 import ir.mrstudios.awscleaner.model.RotationState.Stage;
 import ir.mrstudios.awscleaner.model.RotationState.Trade;
-import ir.mrstudios.awscleaner.util.HttpJson;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -33,8 +30,7 @@ public final class RotationJournal implements AutoCloseable {
     private final Path path;
     private final FileChannel lockChannel;
     private final FileLock lock;
-    private volatile RotationState state;
-    private JsonElement trafficMonitor;
+    private RotationState state;
 
     public RotationJournal(Path file) throws IOException {
         path = file.toAbsolutePath().normalize();
@@ -44,7 +40,7 @@ public final class RotationJournal implements AutoCloseable {
         try {
             lock = lockChannel.tryLock();
             if (lock == null) throw new IOException("Rotation state is already locked by another process");
-            load();
+            state = load(path);
         } catch (IOException | RuntimeException e) {
             lockChannel.close();
             if (e instanceof OverlappingFileLockException) {
@@ -54,36 +50,19 @@ public final class RotationJournal implements AutoCloseable {
         }
     }
 
-    private void load() throws IOException {
-        if (Files.notExists(path)) {
-            state = RotationState.empty();
-            return;
-        }
-        var document = HttpJson.object(Files.readString(path, StandardCharsets.UTF_8), "Rotation state");
+    private static RotationState load(Path path) throws IOException {
+        if (Files.notExists(path)) return RotationState.empty();
         try {
-            var loaded = GSON.fromJson(document, RotationState.class);
-            if (loaded.version() != RotationState.VERSION
-                    || (loaded.instanceArn() == null && !loaded.equals(RotationState.empty()))
-                    || (loaded.instanceArn() != null && loaded.instanceArn().isBlank())) {
-                throw new IllegalArgumentException();
-            }
-            state = loaded;
-            trafficMonitor = document.get("trafficMonitor");
+            var loaded = GSON.fromJson(Files.readString(path, StandardCharsets.UTF_8), RotationState.class);
+            if (loaded == null || loaded.version() != RotationState.VERSION || loaded.instanceArn() == null
+                    || loaded.instanceArn().isBlank()) throw new IllegalArgumentException();
+            return loaded;
         } catch (RuntimeException e) {
             throw new IOException("Invalid or unsupported rotation state file");
         }
     }
 
     public RotationState state() { return state; }
-
-    synchronized JsonElement trafficState() {
-        return trafficMonitor == null ? null : trafficMonitor.deepCopy();
-    }
-
-    synchronized void saveTraffic(JsonObject next) throws IOException {
-        write(state, next);
-        trafficMonitor = next;
-    }
 
     public void bind(String instanceArn) throws IOException {
         if (state.instanceArn() == null) {
@@ -149,23 +128,17 @@ public final class RotationJournal implements AutoCloseable {
                 owned, discarded, trade, pending));
     }
 
-    private synchronized void commit(RotationState next) throws IOException {
-        write(next, trafficMonitor);
-        state = next;
-    }
-
-    private void write(RotationState rotation, JsonElement monitor) throws IOException {
+    private void commit(RotationState next) throws IOException {
         Path temp = Files.createTempFile(path.getParent(), ".rotation-", ".tmp");
         try {
-            JsonObject document = GSON.toJsonTree(rotation).getAsJsonObject();
-            if (monitor != null) document.add("trafficMonitor", monitor);
-            byte[] bytes = GSON.toJson(document).getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = GSON.toJson(next).getBytes(StandardCharsets.UTF_8);
             try (var channel = FileChannel.open(temp, StandardOpenOption.WRITE)) {
                 var buffer = ByteBuffer.wrap(bytes);
                 while (buffer.hasRemaining()) channel.write(buffer);
                 channel.force(true);
             }
             Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            state = next;
         } finally {
             Files.deleteIfExists(temp);
         }

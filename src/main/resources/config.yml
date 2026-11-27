@@ -52,22 +52,6 @@ arvan:
     - domain: "example.net"
       subdomain: "node3"
 
-traffic-monitor:
-  enabled: true
-  check-on-startup: true
-  check-interval-minutes: 10
-  regions:
-    - "eu-central-1"
-    - "eu-west-1"
-    - "eu-west-2"
-  warning-percentages:
-    - 80
-    - 90
-  telegram:
-    enabled: true
-    bot-token: "${TELEGRAM_BOT_TOKEN}"
-    chat-id: 123456789
-
 logging:
   level: "INFO"
   file: "logs/application.log"
