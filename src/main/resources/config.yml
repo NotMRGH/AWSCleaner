@@ -1,0 +1,57 @@
+application:
+  check-interval-minutes: 5
+  check-on-startup: true
+  dry-run: false
+  state-file: "state/rotation.json"
+
+aws:
+  access-key-id: "${AWS_ACCESS_KEY_ID}"
+  secret-access-key: "${AWS_SECRET_ACCESS_KEY}"
+  session-token: ""
+  region: "eu-central-1"
+  instance-name: "MyServer"
+  timeout-seconds: 30
+  operation-timeout-seconds: 180
+  proxy:
+    host: "127.0.0.1"
+    port: 1080
+    username: ""
+    password: ""
+
+ssh:
+  port: 22
+  timeout-seconds: 10
+  attempts: 3
+  retry-delay-seconds: 5
+  host-key-fingerprints: []
+
+network-check:
+  timeout-seconds: 5
+  urls:
+    - "https://www.gstatic.com/generate_204"
+    - "https://www.cloudflare.com/cdn-cgi/trace"
+
+ip-rotation:
+  max-attempts: 5
+  retry-delay-seconds: 15
+  cooldown-minutes: 5
+  max-rotations-per-hour: 10
+  static-ip-quota: 5
+  release-old-ip: true
+
+arvan:
+  api-key: "${ARVAN_API_KEY}"
+  timeout-seconds: 30
+  max-retries: 3
+  retry-delay-seconds: 5
+  records:
+    - domain: "example.com"
+      subdomain: "node1"
+    - domain: "example.com"
+      subdomain: "node2"
+    - domain: "example.net"
+      subdomain: "node3"
+
+logging:
+  level: "INFO"
+  file: "logs/application.log"
